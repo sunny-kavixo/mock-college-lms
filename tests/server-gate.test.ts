@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { db, DB_PATH } from "../college/db/db";
-import { app } from "../college/server/index";
+import { app, getDemoStatusSnapshot } from "../college/server/index";
 import {
   getAssignmentEligibility,
   processRecordingHeartbeat
@@ -56,6 +56,25 @@ describe("server recording gate", () => {
     });
     expect(await response.json()).toMatchObject({ complete: false, reason: "LARGE_JUMP_REJECTED" });
     expect(getAssignmentEligibility("user-demo", "assignment-econ").eligible).toBe(false);
+  });
+
+  test("dashboard and reviewer status expose stable, secret-safe state", async () => {
+    const cookie = await login();
+    const courses = await fetch(`${origin}/courses`, { headers: { cookie } });
+    const coursesHtml = await courses.text();
+    expect(courses.status).toBe(200);
+    expect(coursesHtml).toContain('data-testid="course-grid"');
+    expect(coursesHtml).toContain('data-testid="assignment-status"');
+    expect(coursesHtml).toContain('data-state="LOCKED"');
+    expect(coursesHtml).not.toContain("mockCollegeSession");
+
+    const status = await fetch(`${origin}/demo-status`, { headers: { cookie } });
+    const statusHtml = await status.text();
+    expect(status.status).toBe(200);
+    expect(statusHtml).toContain('data-testid="demo-status"');
+    expect(statusHtml).toContain("Run visibility");
+    expect(statusHtml).not.toContain("demo123");
+    expect(getDemoStatusSnapshot("user-demo").courses).toHaveLength(2);
   });
 
   test("keeps an assignment locked until the recording is complete", () => {

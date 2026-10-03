@@ -23,5 +23,11 @@ export function assertSafeEvidence(html: string): void {
 }
 
 export function safeError(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : "Worker failed");
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "Worker failed";
+  return redactSecrets(message);
 }

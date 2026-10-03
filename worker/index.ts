@@ -35,7 +35,53 @@ interface HeartbeatResponse {
 }
 
 interface EvidenceWriter {
-  capture(page: Page, name: string): Promise<void>;
+  capture(
+    page: Page,
+    name: string,
+    context?: Record<string, unknown>
+  ): Promise<void>;
+  captureFailure(
+    page: Page,
+    name: string,
+    context: Record<string, unknown>
+  ): Promise<void>;
+}
+
+export type WorkerFailureCode =
+  | "AUTH_FAILED"
+  | "COURSE_DISCOVERY_FAILED"
+  | "RECORDING_FAILED"
+  | "GATE_CLOSED"
+  | "AI_PROVIDER_FAILED"
+  | "ASSIGNMENT_SUBMIT_FAILED"
+  | "BROWSER_FAILED"
+  | "WORKER_FAILED";
+
+export function classifyFailure(error: unknown): WorkerFailureCode {
+  const message = safeError(error).toLowerCase();
+
+  if (message.includes("login") || message.includes("sign in") || message.includes("unauthenticated")) {
+    return "AUTH_FAILED";
+  }
+  if (message.includes("course") || message.includes("activity")) {
+    return "COURSE_DISCOVERY_FAILED";
+  }
+  if (message.includes("recording") || message.includes("heartbeat")) {
+    return "RECORDING_FAILED";
+  }
+  if (message.includes("locked") || message.includes("gate") || message.includes("eligib")) {
+    return "GATE_CLOSED";
+  }
+  if (message.includes("ai provider") || message.includes("provider") || message.includes("answer")) {
+    return "AI_PROVIDER_FAILED";
+  }
+  if (message.includes("assignment") || message.includes("submission")) {
+    return "ASSIGNMENT_SUBMIT_FAILED";
+  }
+  if (message.includes("browser") || message.includes("page") || message.includes("playwright")) {
+    return "BROWSER_FAILED";
+  }
+  return "WORKER_FAILED";
 }
 
 const baseUrl = (process.env.COLLEGE_BASE_URL || `http://127.0.0.1:${process.env.PORT || 3001}`)
@@ -54,28 +100,50 @@ function slug(value: string): string {
 function createEvidenceWriter(runId: string, ledger: RunLedger): EvidenceWriter {
   const directory = path.resolve("evidence", runId);
   fs.mkdirSync(directory, { recursive: true });
+  const write = async (
+    page: Page,
+    name: string,
+    context: Record<string, unknown>,
+    failure: boolean
+  ) => {
+    const baseName = slug(name);
+    const html = await page.content();
+
+    try {
+      assertSafeEvidence(html);
+    } catch {
+      ledger.append("evidence.captured", "SKIPPED", {
+        ...context,
+        reason: "SENSITIVE_PAGE",
+        evidencePath: `evidence/${runId}/${baseName}`
+      });
+      return;
+    }
+
+    await page.screenshot({
+      path: path.join(directory, `${baseName}.png`),
+      fullPage: true
+    });
+    fs.writeFileSync(
+      path.join(directory, `${baseName}.html`),
+      html,
+      "utf8"
+    );
+    ledger.append("evidence.captured", failure ? "FAILURE" : "SUCCESS", {
+      ...context,
+      evidencePath: `evidence/${runId}/${baseName}`,
+      files: ["png", "html"].map((extension) =>
+        `evidence/${runId}/${baseName}.${extension}`
+      )
+    });
+  };
 
   return {
-    async capture(page, name) {
-      const baseName = slug(name);
-      const html = await page.content();
-
-      assertSafeEvidence(html);
-
-      await page.screenshot({
-        path: path.join(directory, `${baseName}.png`),
-        fullPage: true
-      });
-      fs.writeFileSync(
-        path.join(directory, `${baseName}.html`),
-        html,
-        "utf8"
-      );
-      ledger.append("evidence.captured", "SUCCESS", {
-        files: ["png", "html"].map((extension) =>
-          `evidence/${runId}/${baseName}.${extension}`
-        )
-      });
+    async capture(page, name, context = {}) {
+      await write(page, name, context, false);
+    },
+    async captureFailure(page, name, context) {
+      await write(page, name, context, true);
     }
   };
 }
@@ -116,7 +184,9 @@ async function closeServer(server: Server | undefined): Promise<void> {
 }
 
 async function discoverCourses(page: Page): Promise<DiscoveredCourse[]> {
-  const uiCourseTitles = await page.locator(".grid > .card h2").allTextContents();
+  const uiCourseTitles = await page
+    .locator('[data-testid="course-card"] [data-testid="course-title"]')
+    .allTextContents();
   const response = await page.evaluate(async () => {
     const result = await fetch("/api/courses");
 
@@ -158,7 +228,7 @@ async function discoverCourses(page: Page): Promise<DiscoveredCourse[]> {
 }
 
 async function extractQuestions(page: Page): Promise<AssignmentQuestion[]> {
-  return page.locator("form .card").evaluateAll((cards) =>
+  return page.locator('[data-testid="question-card"]').evaluateAll((cards) =>
     cards.map((card) => {
       const inputs = Array.from(card.querySelectorAll("input"));
       const firstInput = inputs[0];
@@ -209,14 +279,21 @@ async function watchRecording(
   await page.goto(`${baseUrl}/recordings/${encodeURIComponent(recording.id)}`, {
     waitUntil: "domcontentloaded"
   });
-  await evidence.capture(page, `${course.id}-recording-start`);
+  await evidence.capture(page, `${course.id}-recording-start`, {
+    courseId: course.id,
+    activityId: recording.id,
+    activityType: recording.type
+  });
   ledger.append("recording.started", "STARTED", {
     courseId: course.id,
     activityId: recording.id,
+    activityType: recording.type,
+    reason: "PLAYBACK_STARTED",
     durationSeconds: recording.duration_seconds
   });
 
   const heartbeats: HeartbeatResponse[] = [];
+  const announcedMilestones = new Set<number>();
   const responseListener = (response: import("playwright").Response) => {
     if (
       new URL(response.url()).pathname !== `/api/recordings/${encodeURIComponent(recording.id)}/heartbeat` ||
@@ -229,11 +306,27 @@ async function watchRecording(
       .json()
       .then((body: HeartbeatResponse) => {
         heartbeats.push(body);
-        ledger.append("recording.heartbeat", "OBSERVED", {
+        ledger.append("recording.progress", "OBSERVED", {
           courseId: course.id,
           activityId: recording.id,
+          activityType: recording.type,
+          reason: body.reason,
           serverResponse: body
         });
+        const percent = Math.min(
+          100,
+          Math.round((body.positionSeconds / recording.duration_seconds!) * 100)
+        );
+        for (const milestone of [25, 50, 75]) {
+          if (percent >= milestone && !announcedMilestones.has(milestone)) {
+            announcedMilestones.add(milestone);
+            console.log(`    ${milestone}% server progress`);
+          }
+        }
+        if (body.complete && !announcedMilestones.has(100)) {
+          announcedMilestones.add(100);
+          console.log("    ✓ Server reports recording complete");
+        }
       })
       .catch(() => undefined);
   };
@@ -258,10 +351,17 @@ async function watchRecording(
     throw new Error(`College server never reported ${recording.id} complete`);
   }
 
-  await evidence.capture(page, `${course.id}-recording-complete`);
+  await evidence.capture(page, `${course.id}-recording-complete`, {
+    courseId: course.id,
+    activityId: recording.id,
+    activityType: recording.type,
+    reason: "SERVER_CONFIRMED_COMPLETE"
+  });
   ledger.append("recording.completed", "SUCCESS", {
     courseId: course.id,
     activityId: recording.id,
+    activityType: recording.type,
+    reason: "SERVER_CONFIRMED_COMPLETE",
     serverReportedComplete: true,
     completionPositionSeconds: completion.positionSeconds,
     watchedSeconds: completion.watchedSeconds,
@@ -285,7 +385,7 @@ async function probeLockedAssignment(
   );
   const blockedStatus = blockedResponse?.status();
 
-  if (blockedStatus !== 403 || !(await page.getByText("Assignment Locked").count())) {
+  if (blockedStatus !== 403 || !(await page.getByTestId("assignment-locked").count())) {
     throw new Error(`Assignment ${assignment.id} was not blocked before recording completion`);
   }
 
@@ -297,10 +397,17 @@ async function probeLockedAssignment(
     throw new Error("College accepted a submission while the recording gate was closed");
   }
 
-  await evidence.capture(page, `${course.id}-assignment-blocked`);
+  await evidence.capture(page, `${course.id}-assignment-blocked`, {
+    courseId: course.id,
+    activityId: assignment.id,
+    activityType: assignment.type,
+    reason: "RECORDING_INCOMPLETE"
+  });
   ledger.append("assignment.blocked", "BLOCKED", {
     courseId: course.id,
     activityId: assignment.id,
+    activityType: assignment.type,
+    reason: "RECORDING_INCOMPLETE",
     decision: "REFUSED",
     providerCalled: false,
     httpStatus: blockedStatus,
@@ -322,6 +429,14 @@ async function submitAssignment(
   );
   if (!gateResponse.ok()) throw new Error("College eligibility check failed");
   const eligibility = await gateResponse.json() as { eligible: boolean; reason: string };
+  ledger.append("assignment.eligible", eligibility.eligible ? "SUCCESS" : "BLOCKED", {
+    courseId: course.id,
+    activityId: assignment.id,
+    requiredRecordingId,
+    activityType: assignment.type,
+    reason: eligibility.reason,
+    serverEligible: eligibility.eligible
+  });
   const answers = await answerEligibleAssignment({
     courseId: course.id,
     activityId: assignment.id,
@@ -335,13 +450,20 @@ async function submitAssignment(
         { waitUntil: "domcontentloaded" }
       );
       if (response?.status() !== 200) {
-        ledger.append("assignment.blocked", "REFUSED", {
+        ledger.append("assignment.submit.failed", "FAILED", {
           courseId: course.id, activityId: assignment.id,
+          activityType: assignment.type,
+          reason: "SERVER_REFUSED_ASSIGNMENT",
           providerCalled: false, httpStatus: response?.status()
         });
         throw new Error("College refused assignment access");
       }
-      await evidence.capture(page, `${course.id}-assignment-questions`);
+      await evidence.capture(page, `${course.id}-assignment-questions`, {
+        courseId: course.id,
+        activityId: assignment.id,
+        activityType: assignment.type,
+        reason: "SERVER_ELIGIBLE"
+      });
       return extractQuestions(page);
     }
   });
@@ -352,24 +474,32 @@ async function submitAssignment(
       response.url() === `${baseUrl}/assignments/${encodeURIComponent(assignment.id)}/submit` &&
       response.request().method() === "POST"
     ),
-    page.getByRole("button", { name: "Submit assignment" }).click()
+    page.getByTestId("assignment-submit").click()
   ]);
   if (!submissionResponse.ok()) {
     if (submissionResponse.status() === 403) {
-      ledger.append("assignment.blocked", "REFUSED", {
+      ledger.append("assignment.submit.failed", "FAILED", {
         courseId: course.id, activityId: assignment.id, providerCalled: true,
-        phase: "submission", httpStatus: 403
+        activityType: assignment.type,
+        reason: "SERVER_REFUSED_AFTER_AI", phase: "submission", httpStatus: 403
       });
     }
     throw new Error(`Assignment ${assignment.id} was not accepted by the server`);
   }
-  await page.getByRole("heading", { name: "Assignment Submitted ✓" }).waitFor();
+  await page.getByTestId("submission-success").waitFor();
 
-  await evidence.capture(page, `${course.id}-assignment-submitted`);
+  await evidence.capture(page, `${course.id}-assignment-submitted`, {
+    courseId: course.id,
+    activityId: assignment.id,
+    activityType: assignment.type,
+    reason: "SERVER_ACCEPTED"
+  });
   ledger.append("assignment.submitted", "SUCCESS", {
     courseId: course.id,
     activityId: assignment.id,
     requiredRecordingId,
+    activityType: assignment.type,
+    reason: "SERVER_ACCEPTED",
     serverAccepted: true,
     httpStatus: submissionResponse.status(),
     provider: provider.name
@@ -388,30 +518,76 @@ export async function runWorker(): Promise<{
   const provider = createAIAnswerProvider();
   let ownedServer: Server | undefined;
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  let page: Page | undefined;
+  const browserErrors: string[] = [];
 
   ledger.append("run.started", "STARTED", {
     collegeOrigin: new URL(baseUrl).origin,
     automation: "playwright",
-    provider: provider.name
+    provider: provider.name,
+    reason: "WORKER_STARTED"
   });
+  console.log(`RUN: ${runId}`);
+  console.log(`Provider: ${provider.name}`);
 
   try {
     ownedServer = await waitForServer();
     browser = await chromium.launch({
       headless: process.env.HEADLESS !== "false"
     });
-    const page = await browser.newPage();
+    page = await browser.newPage();
+    page.on("pageerror", (error) => browserErrors.push(safeError(error)));
+    page.on("console", (message) => {
+      const text = safeError(message.text());
+      // The worker deliberately probes the locked assignment and a browser may
+      // report its expected HTTP 403 navigation as a console resource error.
+      if (message.type() === "error" && !/failed to load resource.*403/i.test(text)) {
+        browserErrors.push(text);
+      }
+    });
 
+    ledger.append("login.started", "STARTED", {
+      reason: "UI_FORM",
+      activityType: "AUTHENTICATION"
+    });
     await page.goto(`${baseUrl}/login`, { waitUntil: "domcontentloaded" });
-    await page.getByLabel("Email").fill(loginEmail);
-    await page.getByLabel("Password").fill(loginPassword);
-    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByTestId("email-input").fill(loginEmail);
+    await page.getByTestId("password-input").fill(loginPassword);
+    await page.getByTestId("login-submit").click();
     await page.waitForURL(`${baseUrl}/courses`);
-    ledger.append("login.completed", "SUCCESS", { method: "UI_FORM", browser: browser.version() });
-    await evidence.capture(page, "login-complete-courses");
+    ledger.append("login.completed", "SUCCESS", {
+      method: "UI_FORM",
+      activityType: "AUTHENTICATION",
+      reason: "SESSION_ESTABLISHED",
+      browser: browser.version()
+    });
+    console.log("LOGIN\n  ✓ Signed in");
+    await evidence.capture(page, "login-complete-courses", {
+      activityType: "AUTHENTICATION",
+      reason: "LOGIN_COMPLETE"
+    });
 
     const courses = await discoverCourses(page);
+    for (const course of courses) {
+      ledger.append("course.discovered", "SUCCESS", {
+        courseId: course.id,
+        activityType: "COURSE",
+        reason: "COURSE_DISCOVERED",
+        title: course.title
+      });
+      for (const activity of course.activities) {
+        ledger.append("activity.discovered", "SUCCESS", {
+          courseId: course.id,
+          activityId: activity.id,
+          activityType: activity.type,
+          reason: "ACTIVITY_DISCOVERED",
+          title: activity.title
+        });
+      }
+    }
     ledger.append("courses.discovered", "SUCCESS", {
+      activityType: "COURSE_CATALOG",
+      reason: "CATALOG_MATCHED_UI_AND_API",
       courseCount: courses.length,
       activityCount: courses.reduce(
         (count, course) => count + course.activities.length,
@@ -440,16 +616,31 @@ export async function runWorker(): Promise<{
         throw new Error(`Course ${course.id} is missing required activities`);
       }
 
+      console.log(`\nCOURSE: ${course.title}`);
+      console.log("  ✓ Activities discovered");
       await probeLockedAssignment(page, assignment, course, ledger, evidence);
+      console.log("  ✓ Assignment initially blocked");
+      console.log("  ▶ Watching recording...");
       await watchRecording(page, recording, ledger, evidence, course);
+      console.log("  ✓ Assignment eligible");
       await submitAssignment(page, assignment, course, recording.id, provider, ledger, evidence);
+      console.log("  ✓ AI answers received");
+      console.log("  ✓ Assignment submitted");
+      console.log("  ✓ Evidence captured");
     }
 
     await page.goto(`${baseUrl}/courses`, { waitUntil: "domcontentloaded" });
-    if (await page.locator(".status.submitted").count() !== courses.length) {
+    if (await page.locator('[data-testid="assignment-status"][data-state="SUBMITTED"]').count() !== courses.length) {
       throw new Error("College overview did not confirm every assignment submitted");
     }
-    await evidence.capture(page, "all-courses-submitted");
+    await evidence.capture(page, "all-courses-submitted", {
+      activityType: "COURSE_CATALOG",
+      reason: "ALL_ASSIGNMENTS_SUBMITTED"
+    });
+
+    if (browserErrors.length > 0) {
+      throw new Error(`Browser reported ${browserErrors.length} client error(s)`);
+    }
 
     const invariantErrors = checkRunInvariants(ledger.records);
 
@@ -458,9 +649,12 @@ export async function runWorker(): Promise<{
     }
 
     ledger.append("run.completed", "SUCCESS", {
+      activityType: "RUN",
+      reason: "ALL_COURSES_COMPLETE",
       invariantCheck: "PASS",
       courseCount: courses.length
     });
+    console.log(`\nRUN COMPLETE\n  Status: SUCCESS\n  Ledger: ${ledger.filePath}\n  Evidence: ${path.resolve("evidence", runId)}`);
 
     return {
       runId,
@@ -469,10 +663,27 @@ export async function runWorker(): Promise<{
       provider: provider.name
     };
   } catch (error) {
+    const failureCode = classifyFailure(error);
+    const failureMessage = browserErrors.length > 0
+      ? `${safeError(error)}: ${browserErrors.join(" | ")}`
+      : safeError(error);
+    if (typeof page !== "undefined") {
+      try {
+        await evidence.captureFailure(page, `failure-${failureCode.toLowerCase()}`, {
+          failureCode,
+          reason: safeError(error)
+        });
+      } catch {
+        // Failure evidence is best effort and must not mask the root failure.
+      }
+    }
     ledger.append("run.failed", "FAILED", {
-      error: safeError(error),
+      activityType: "RUN",
+      failureCode,
+      error: failureMessage,
       invariantCheck: checkRunInvariants(ledger.records).length === 0 ? "PASS" : "FAIL"
     });
+    console.error(`RUN FAILED [${failureCode}]: ${failureMessage}`);
     throw error;
   } finally {
     try {

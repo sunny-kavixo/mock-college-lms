@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { checkRunInvariants, RunLedger, type LedgerRecord } from "../worker/ledger";
 import { answerEligibleAssignment } from "../worker/orchestrator/assignment";
 import { assertSafeEvidence } from "../worker/artifacts";
+import { classifyFailure } from "../worker/index";
 
 function record(sequence: number, event: string, status: string, fields: Record<string, unknown> = {}): LedgerRecord {
   return {
@@ -43,6 +44,13 @@ afterEach(() => {
 });
 
 describe("worker ordering invariants", () => {
+  test("classifies failures without exposing provider credentials", () => {
+    expect(classifyFailure(new Error("AI provider request failed with HTTP 503"))).toBe("AI_PROVIDER_FAILED");
+    expect(classifyFailure(new Error("Assignment was not accepted by the server"))).toBe("ASSIGNMENT_SUBMIT_FAILED");
+    expect(classifyFailure(new Error("College server never reported recording complete"))).toBe("RECORDING_FAILED");
+    expect(classifyFailure(new Error("Assignment Locked"))).toBe("GATE_CLOSED");
+  });
+
   test("accepts completion followed by answering and submission", () => {
     expect(checkRunInvariants(validRun())).toEqual([]);
   });

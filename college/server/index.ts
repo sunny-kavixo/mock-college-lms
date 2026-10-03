@@ -1,10 +1,12 @@
 import express from "express";
+import fs from "node:fs";
 import path from "node:path";
 import { db, initSchema } from "../db/db";
 import {
   getAssignmentEligibility,
   processRecordingHeartbeat
 } from "./gate";
+import { DESIGN_SYSTEM_CSS } from "./ui";
 
 initSchema();
 
@@ -182,14 +184,23 @@ function htmlPage(title: string, body: string): string {
   .muted { color: #64748b; }
   .error { color: #b91c1c; }
   label { font-weight: 600; }
+  ${DESIGN_SYSTEM_CSS}
 </style>
 </head>
 <body>
-<header>
-  <a href="/courses"><strong>Mock College LMS</strong></a>
-  <span>Engineering Exercise</span>
+<header class="site-header" data-testid="site-header">
+  <div class="header-inner">
+    <a class="brand" href="/courses" data-testid="brand-link">
+      <span class="brand-mark" aria-hidden="true">M</span>
+      <strong>Mock College LMS</strong>
+    </a>
+    <div class="header-meta">
+      <span class="header-kicker">Student learning workspace</span>
+      <span class="env-badge">DEMO</span>
+    </div>
+  </div>
 </header>
-<main>${body}</main>
+<main class="page-shell">${body}</main>
 </body>
 </html>`;
 }
@@ -206,6 +217,131 @@ function escapeHtml(value: string): string {
         '"': "&quot;"
       })[character] ?? character
   );
+}
+
+interface DemoRunSummary {
+  runId: string;
+  provider: string;
+  status: string;
+  evidenceDirectory: string;
+}
+
+function readLatestRunSummary(): DemoRunSummary | null {
+  const ledgerDirectory = path.resolve("ledger");
+
+  if (!fs.existsSync(ledgerDirectory)) {
+    return null;
+  }
+
+  const files = fs
+    .readdirSync(ledgerDirectory)
+    .filter((file) => file.endsWith(".jsonl"))
+    .map((file) => ({
+      file,
+      modifiedAt: fs.statSync(path.join(ledgerDirectory, file)).mtimeMs
+    }))
+    .sort((left, right) => right.modifiedAt - left.modifiedAt);
+
+  for (const entry of files) {
+    try {
+      const records = fs
+        .readFileSync(path.join(ledgerDirectory, entry.file), "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const started = records.find((record) => record.event === "run.started");
+      const finished = [...records]
+        .reverse()
+        .find(
+          (record) =>
+            record.event === "run.completed" || record.event === "run.failed"
+        );
+      const runId = typeof started?.runId === "string" ? started.runId : entry.file.replace(/\.jsonl$/, "");
+      const provider = typeof started?.provider === "string" ? started.provider : "Unknown";
+
+      return {
+        runId,
+        provider,
+        status: typeof finished?.status === "string" ? finished.status : "IN_PROGRESS",
+        evidenceDirectory: `evidence/${runId}`
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+export function getDemoStatusSnapshot(userId: string) {
+  const courses = db
+    .prepare("SELECT id, title FROM courses ORDER BY title")
+    .all() as Array<{ id: string; title: string }>;
+
+  const courseStatus = courses.map((course) => {
+    const activities = db
+      .prepare(`
+        SELECT id, type, title, duration_seconds
+        FROM activities
+        WHERE course_id = ?
+        ORDER BY sort_order
+      `)
+      .all(course.id) as Array<{
+        id: string;
+        type: "MEETING_RECORDING" | "ASSIGNMENT";
+        title: string;
+        duration_seconds: number | null;
+      }>;
+    const recording = activities.find((activity) => activity.type === "MEETING_RECORDING");
+    const assignment = activities.find((activity) => activity.type === "ASSIGNMENT");
+    const progress = recording
+      ? (db
+          .prepare(`
+            SELECT watched_seconds, complete
+            FROM recording_progress
+            WHERE user_id = ? AND activity_id = ?
+          `)
+          .get(userId, recording.id) as
+          | { watched_seconds: number; complete: number }
+          | undefined)
+      : undefined;
+    const submission = assignment
+      ? (db
+          .prepare(`
+            SELECT status
+            FROM assignment_submissions
+            WHERE user_id = ? AND activity_id = ?
+          `)
+          .get(userId, assignment.id) as { status: string } | undefined)
+      : undefined;
+    const eligibility = assignment
+      ? getAssignmentEligibility(userId, assignment.id)
+      : { eligible: false, reason: "NO_ASSIGNMENT" };
+    const durationSeconds = recording?.duration_seconds ?? 0;
+    const progressPercent = durationSeconds
+      ? Math.min(100, Math.round(((progress?.watched_seconds ?? 0) / durationSeconds) * 100))
+      : 0;
+
+    return {
+      id: course.id,
+      title: course.title,
+      activityCount: activities.length,
+      recordingComplete: Boolean(progress?.complete),
+      progressPercent,
+      assignmentState: submission
+        ? "SUBMITTED"
+        : eligibility.eligible
+          ? "OPEN"
+          : "LOCKED"
+    };
+  });
+
+  return {
+    courses: courseStatus,
+    activityCount: courseStatus.reduce((total, course) => total + course.activityCount, 0),
+    latestRun: readLatestRunSummary()
+  };
 }
 
 app.get("/", (req, res) => {
@@ -229,14 +365,17 @@ app.get("/login", (_req, res) => {
     htmlPage(
       "Login",
       `
-      <div class="card" style="max-width:480px;margin:70px auto;">
-        <h1>Student Login</h1>
-        <p class="muted">Seeded demo account</p>
+      <div class="card auth-card" data-testid="login-card">
+        <div class="auth-mark" aria-hidden="true">M</div>
+        <p class="eyebrow">Mock College · Demo environment</p>
+        <h1>Welcome back</h1>
+        <p class="muted">Sign in to continue your server-verified learning session.</p>
 
-        <form method="post" action="/login">
+        <form method="post" action="/login" data-testid="login-form">
           <label for="email">Email</label>
           <input
             id="email"
+            data-testid="email-input"
             name="email"
             value="student@mockcollege.local"
             autocomplete="username"
@@ -245,14 +384,16 @@ app.get("/login", (_req, res) => {
           <label for="password">Password</label>
           <input
             id="password"
+            data-testid="password-input"
             type="password"
             name="password"
             value="demo123"
             autocomplete="current-password"
           />
 
-          <button type="submit">Sign in</button>
+          <button class="button" data-testid="login-submit" type="submit">Sign in</button>
         </form>
+        <p class="muted" style="margin:20px 0 0;font-size:12px;">Seeded demo account · student@mockcollege.local</p>
       </div>
       `
     )
@@ -310,7 +451,7 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
     .map((course) => {
       const activities = db
         .prepare(`
-          SELECT id, type, title
+          SELECT id, type, title, duration_seconds
           FROM activities
           WHERE course_id = ?
           ORDER BY sort_order
@@ -319,6 +460,7 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
           id: string;
           type: string;
           title: string;
+          duration_seconds: number | null;
         }>;
 
       const recording = activities.find(
@@ -370,36 +512,52 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
             ? "open"
             : "locked";
 
+      const durationSeconds = recording?.duration_seconds ?? 0;
+      const watchedSeconds = progress?.watched_seconds ?? 0;
+      const progressPercent = durationSeconds
+        ? Math.min(100, Math.round((watchedSeconds / durationSeconds) * 100))
+        : 0;
+      const recordingState = progress?.complete ? "Complete" : "In progress";
+
       return `
-        <div class="card">
-          <h2>${escapeHtml(course.title)}</h2>
+        <article class="card course-card" data-testid="course-card" data-course-id="${escapeHtml(course.id)}">
+          <div class="course-card-header">
+            <div>
+              <p class="eyebrow">Course workspace</p>
+              <h2 data-testid="course-title">${escapeHtml(course.title)}</h2>
+            </div>
+            <span class="status ${statusClass}" data-testid="assignment-status" data-state="${state}">${state}</span>
+          </div>
 
-          <p>
-            Recording:
-            <strong>${progress?.complete ? "Complete" : "Incomplete"}</strong>
-          </p>
+          <div class="metric-row">
+            <span class="metric-label">Recording progress</span>
+            <strong class="metric-value" data-testid="recording-state">${recordingState}</strong>
+          </div>
+          <div class="progress-track" role="progressbar" aria-label="${escapeHtml(course.title)} recording progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressPercent}">
+            <div class="progress-bar" data-testid="recording-progress" style="width:${progressPercent}%"></div>
+          </div>
+          <div class="progress-caption">
+            <span data-testid="recording-progress-percent">${progressPercent}% server accepted</span>
+            <span>${durationSeconds || "—"} sec</span>
+          </div>
 
-          <p>
-            Assignment:
-            <span class="status ${statusClass}">${state}</span>
-          </p>
+          <div class="course-next" data-testid="course-next-action">
+            ${submission
+              ? "Submission recorded. This course milestone is complete."
+              : eligibility.eligible
+                ? "Next step: open the assignment and submit your answers."
+                : "Next step: watch the recording to unlock the assignment."}
+          </div>
 
-          ${
-            recording
-               ? `<a class="button" href="/recordings/${encodeURIComponent(recording.id)}">
-                   Open recording
-                 </a>`
-              : ""
-          }
-
-          ${
-            assignment && eligibility.eligible
-               ? `<a class="button" href="/assignments/${encodeURIComponent(assignment.id)}">
-                   Open assignment
-                 </a>`
-              : ""
-          }
-        </div>
+          <div class="button-row">
+            ${recording
+              ? `<a class="button secondary" data-testid="recording-link" href="/recordings/${encodeURIComponent(recording.id)}">Open recording</a>`
+              : ""}
+            ${assignment && eligibility.eligible
+              ? `<a class="button" data-testid="assignment-link" href="/assignments/${encodeURIComponent(assignment.id)}">Open assignment</a>`
+              : ""}
+          </div>
+        </article>
       `;
     })
     .join("");
@@ -408,22 +566,92 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
     htmlPage(
       "Courses",
       `
-      <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div class="page-heading" data-testid="courses-heading">
         <div>
-          <h1>Your Courses</h1>
+          <p class="eyebrow">Student workspace</p>
+          <h1>Your course overview</h1>
           <p class="muted">
-            Recordings must be server-confirmed complete before assignments unlock.
+            Server truth keeps each assignment safely behind its required recording.
           </p>
         </div>
-
-        <form method="post" action="/logout">
-          <button type="submit">Logout</button>
-        </form>
+        <div class="heading-actions">
+          <span class="student-chip">Demo Student</span>
+          <a class="button secondary" data-testid="demo-status-link" href="/demo-status">Demo status</a>
+          <form method="post" action="/logout">
+            <button class="button ghost" data-testid="logout-button" type="submit">Log out</button>
+          </form>
+        </div>
       </div>
 
-      <div class="grid">
+      <div class="course-grid" data-testid="course-grid">
         ${cards}
       </div>
+      `
+    )
+  );
+});
+
+app.get("/demo-status", requireAuth, (req: AuthedRequest, res) => {
+  const snapshot = getDemoStatusSnapshot(req.userId!);
+  const latestRun = snapshot.latestRun;
+  const runStatusClass = latestRun?.status === "SUCCESS" ? "submitted" : "locked";
+  const courseRows = snapshot.courses
+    .map(
+      (course) => `
+        <tr data-testid="demo-status-course" data-course-id="${escapeHtml(course.id)}">
+          <td><strong>${escapeHtml(course.title)}</strong></td>
+          <td>${course.activityCount}</td>
+          <td>${course.recordingComplete ? "Complete" : "Incomplete"} · ${course.progressPercent}%</td>
+          <td><span class="status ${course.assignmentState === "SUBMITTED" ? "submitted" : course.assignmentState === "OPEN" ? "open" : "locked"}" data-testid="demo-status-assignment">${course.assignmentState}</span></td>
+        </tr>
+      `
+    )
+    .join("");
+
+  res.send(
+    htmlPage(
+      "Demo status",
+      `
+      <div class="page-heading" data-testid="demo-status">
+        <div>
+          <p class="eyebrow">Reviewer console · DEMO</p>
+          <h1>Run visibility</h1>
+          <p class="muted">A secret-safe snapshot of server state and the latest worker run.</p>
+        </div>
+        <a class="button secondary" data-testid="demo-status-back" href="/courses">← Back to courses</a>
+      </div>
+
+      <div class="status-grid">
+        <div class="status-metric"><span class="metric-label">Seeded courses</span><strong data-testid="demo-course-count">${snapshot.courses.length}</strong></div>
+        <div class="status-metric"><span class="metric-label">Activities</span><strong data-testid="demo-activity-count">${snapshot.activityCount}</strong></div>
+        <div class="status-metric"><span class="metric-label">Latest run status</span><strong data-testid="demo-run-status">${latestRun ? escapeHtml(latestRun.status) : "No run yet"}</strong></div>
+        <div class="status-metric"><span class="metric-label">Provider</span><strong data-testid="demo-run-provider">${latestRun ? escapeHtml(latestRun.provider) : "No run yet"}</strong></div>
+      </div>
+
+      <section class="card" data-testid="demo-run-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Latest worker run</p>
+            <h2>${latestRun ? escapeHtml(latestRun.runId) : "Waiting for first run"}</h2>
+          </div>
+          <span class="status ${runStatusClass}" data-testid="demo-run-badge">${latestRun ? escapeHtml(latestRun.status) : "NOT RUN"}</span>
+        </div>
+        <p class="muted" data-testid="demo-evidence-directory">Evidence: ${latestRun ? escapeHtml(latestRun.evidenceDirectory) : "—"}</p>
+        <p class="muted" style="margin-bottom:0;">Credentials, cookies, authorization headers, and provider secrets are intentionally excluded.</p>
+      </section>
+
+      <section class="card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Server truth</p>
+            <h2>Course milestones</h2>
+          </div>
+        </div>
+        <table class="status-table">
+          <thead><tr><th>Course</th><th>Activities</th><th>Recording</th><th>Assignment</th></tr></thead>
+          <tbody>${courseRows}</tbody>
+        </table>
+      </section>
       `
     )
   );
@@ -480,38 +708,52 @@ app.get(
       htmlPage(
         activity.title,
         `
-        <div class="card">
-          <a href="/courses">← Back to courses</a>
-
-           <h1>${escapeHtml(activity.title)}</h1>
-
-          <div class="recording">
+        <div data-testid="recording-page">
+          <div class="section-heading">
             <div>
-              <h2>Meeting Recording</h2>
-              <p>
-                Time-compressed demo recording:
-                        ${activity.duration_seconds} seconds
+              <p class="eyebrow">Course recording</p>
+              <h1>${escapeHtml(activity.title)}</h1>
+              <p class="muted">Time-compressed meeting playback · ${activity.duration_seconds} seconds</p>
+            </div>
+            <a class="button secondary" data-testid="recording-back" href="/courses">← Back to courses</a>
+          </div>
+
+          <div class="recording-shell">
+            <div class="recording" data-testid="recording-player">
+              <div>
+                <div class="recording-icon" aria-hidden="true">▶</div>
+                <p class="eyebrow" style="color:#93c5fd;">Server-validated playback</p>
+                <h2>Stay with the recording</h2>
+                <p style="color:#c7d4e8;max-width:32rem;">Progress is accepted by the college server one heartbeat at a time.</p>
+                <button class="button" data-testid="recording-play" id="playButton">
+                  ${progress.complete ? "Completed ✓" : "Play recording"}
+                </button>
+              </div>
+            </div>
+
+            <div class="recording-controls">
+              <div class="metric-row">
+                <strong>Playback position</strong>
+                <span class="recording-status" id="status" data-testid="playback-status">
+                  ${progress.complete ? "College reports recording complete ✓" : "Ready to play"}
+                </span>
+              </div>
+              <div class="progress-track" role="progressbar" aria-label="Recording playback progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="progress-bar" id="progressBar" data-testid="recording-progress-bar"></div>
+              </div>
+              <div class="progress-caption">
+                <span id="timeReadout" data-testid="recording-time">${progress.last_position_seconds.toFixed(0)} / ${activity.duration_seconds} sec</span>
+                <span id="percentReadout" data-testid="recording-percent">0%</span>
+              </div>
+              <p class="recording-status" id="serverProgress" data-testid="server-progress" style="margin:18px 0 0;">
+                Server accepted: ${progress.watched_seconds.toFixed(1)} sec
               </p>
-              <button id="playButton">
-                ${progress.complete ? "Completed ✓" : "Play recording"}
-              </button>
+              <div class="gate-note" data-testid="gate-warning">
+                <strong>Gate rule</strong>
+                <span>Seeking to the end does not satisfy the completion gate. Only sequential server-accepted playback unlocks the assignment.</span>
+              </div>
             </div>
           </div>
-
-          <div class="progress-track">
-            <div class="progress-bar" id="progressBar"></div>
-          </div>
-
-          <p id="status">
-            ${progress.complete
-              ? "College reports recording complete ✓"
-              : "Recording incomplete"}
-          </p>
-
-          <p class="muted">
-            The server validates sequential playback heartbeats.
-            Seeking directly to the end will not complete the recording.
-          </p>
         </div>
 
 <script>
@@ -519,6 +761,7 @@ app.get(
   const duration = ${JSON.stringify(activity.duration_seconds)};
   const activityId = ${JSON.stringify(activity.id)};
   let position = ${JSON.stringify(progress.last_position_seconds)};
+  let watched = ${JSON.stringify(progress.watched_seconds)};
   let playing = false;
   let timer = null;
   let complete = ${Boolean(progress.complete)};
@@ -526,10 +769,18 @@ app.get(
   const button = document.getElementById("playButton");
   const progressBar = document.getElementById("progressBar");
   const status = document.getElementById("status");
+  const timeReadout = document.getElementById("timeReadout");
+  const percentReadout = document.getElementById("percentReadout");
+  const serverProgress = document.getElementById("serverProgress");
+  const progressTrack = progressBar.parentElement;
 
   function render() {
-    progressBar.style.width =
-      Math.min(100, (position / duration) * 100) + "%";
+    const percent = Math.min(100, Math.round((position / duration) * 100));
+    progressBar.style.width = percent + "%";
+    progressTrack.setAttribute("aria-valuenow", String(percent));
+    timeReadout.textContent = position.toFixed(0) + " / " + duration + " sec";
+    percentReadout.textContent = percent + "%";
+    serverProgress.textContent = "Server accepted: " + watched.toFixed(1) + " sec";
 
     if (complete) {
       button.textContent = "Completed ✓";
@@ -538,11 +789,7 @@ app.get(
     } else {
       button.textContent = playing ? "Pause" : "Play recording";
       status.textContent =
-        "Playback: " +
-        position.toFixed(0) +
-        " / " +
-        duration +
-        " seconds";
+        "Playback in progress";
     }
   }
 
@@ -563,6 +810,7 @@ app.get(
     }
 
     complete = result.complete;
+    watched = result.watchedSeconds;
 
     if (complete) {
       playing = false;
@@ -697,12 +945,13 @@ app.get(
         htmlPage(
           "Assignment locked",
           `
-          <div class="card">
-            <h1>Assignment Locked</h1>
-            <p class="error">
-              Required recording is not yet complete.
-            </p>
-            <a class="button" href="/courses">
+          <div class="card" data-testid="assignment-locked">
+            <p class="eyebrow">Server-owned gate</p>
+            <h1>Assignment locked</h1>
+            <div class="notice error">
+              Required recording is not yet complete. Assignment work is refused until the college server confirms completion.
+            </div>
+            <a class="button secondary" data-testid="locked-back" href="/courses">
               Back to courses
             </a>
           </div>
@@ -733,14 +982,14 @@ app.get(
           ) as string[];
 
           return `
-            <div class="card">
+            <div class="card question-card" data-testid="question-card" data-question-id="${escapeHtml(question.id)}">
                <p><strong>${escapeHtml(question.prompt)}</strong></p>
-              ${options
-                .map(
-                  (option) => `
-                    <label style="display:block;margin:8px 0;">
+               ${options
+                 .map(
+                   (option) => `
+                    <label class="option">
                       <input
-                        style="width:auto;"
+                        data-testid="question-input"
                         type="radio"
                         name="${escapeHtml(question.id)}"
                         value="${escapeHtml(option)}"
@@ -756,9 +1005,9 @@ app.get(
         }
 
         return `
-          <div class="card">
-            <label>${escapeHtml(question.prompt)}</label>
-            <input name="${escapeHtml(question.id)}" required />
+          <div class="card question-card" data-testid="question-card" data-question-id="${escapeHtml(question.id)}">
+            <label class="field-label" for="question-${escapeHtml(question.id)}">${escapeHtml(question.prompt)}</label>
+            <input id="question-${escapeHtml(question.id)}" data-testid="question-input" name="${escapeHtml(question.id)}" required />
           </div>
         `;
       })
@@ -768,13 +1017,22 @@ app.get(
       htmlPage(
         activity.title,
         `
-        <a href="/courses">← Back to courses</a>
-         <h1>${escapeHtml(activity.title)}</h1>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Assignment workspace</p>
+            <h1>${escapeHtml(activity.title)}</h1>
+            <p class="muted">Answer each question, then submit once. The college server owns eligibility.</p>
+          </div>
+          <a class="button secondary" data-testid="assignment-back" href="/courses">← Back to courses</a>
+        </div>
+        <div class="notice" data-testid="assignment-eligibility">
+          <strong>Eligible on the server.</strong> The required recording has been confirmed complete.
+        </div>
 
-         <form method="post" action="/assignments/${encodeURIComponent(activity.id)}/submit">
-          ${fields}
-          <button type="submit">Submit assignment</button>
-        </form>
+         <form class="assignment-form" data-testid="assignment-form" method="post" action="/assignments/${encodeURIComponent(activity.id)}/submit">
+           ${fields}
+           <button class="button" data-testid="assignment-submit" type="submit">Submit assignment</button>
+         </form>
         `
       )
     );
@@ -823,10 +1081,11 @@ app.post(
       htmlPage(
         "Submitted",
         `
-        <div class="card">
-          <h1>Assignment Submitted ✓</h1>
-          <p>Your submission has been recorded.</p>
-          <a class="button" href="/courses">
+        <div class="card" data-testid="submission-success">
+          <p class="eyebrow">Server response</p>
+          <h1>Assignment submitted ✓</h1>
+          <p class="muted">Your answers were accepted and recorded by Mock College.</p>
+          <a class="button" data-testid="submission-back" href="/courses">
             Return to courses
           </a>
         </div>
