@@ -106,7 +106,7 @@ export function evaluateRecordingHeartbeat(params: {
   // 2. playback position close to the real end
   const complete =
     contiguousSeconds >= durationSeconds * 0.9 &&
-    position >= durationSeconds - 1;
+    position >= durationSeconds;
 
   let reason: RecordingGateResult["reason"];
 

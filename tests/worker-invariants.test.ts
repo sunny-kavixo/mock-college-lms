@@ -22,7 +22,7 @@ function validRun(): LedgerRecord[] {
     record(3, "recording.started", "STARTED", { activityId: "recording-econ", durationSeconds: 24 }),
     record(4, "recording.completed", "SUCCESS", {
       activityId: "recording-econ", serverReportedComplete: true,
-      contiguousSeconds: 23, completionPositionSeconds: 23
+      contiguousSeconds: 23, completionPositionSeconds: 24
     }),
     record(5, "assignment.started", "STARTED", assignment),
     record(6, "ai.answers.completed", "SUCCESS", assignment),

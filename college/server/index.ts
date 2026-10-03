@@ -222,8 +222,20 @@ function escapeHtml(value: string): string {
 interface DemoRunSummary {
   runId: string;
   provider: string;
+  model: string;
   status: string;
+  timestamp: string;
+  courseCount: number;
+  blockedAttempts: number;
+  assignmentsSubmitted: number;
+  ledgerPath: string;
   evidenceDirectory: string;
+}
+
+function humanProviderLabel(provider: string, model: string): string {
+  if (provider === "deterministic-dev") return "Deterministic development provider";
+  if (model === "openai/gpt-oss-20b") return "NVIDIA · GPT-OSS 20B";
+  return "OpenAI-compatible real provider";
 }
 
 function readLatestRunSummary(): DemoRunSummary | null {
@@ -258,12 +270,26 @@ function readLatestRunSummary(): DemoRunSummary | null {
             record.event === "run.completed" || record.event === "run.failed"
         );
       const runId = typeof started?.runId === "string" ? started.runId : entry.file.replace(/\.jsonl$/, "");
-      const provider = typeof started?.provider === "string" ? started.provider : "Unknown";
+      const rawProvider = typeof started?.provider === "string" ? started.provider : "Unknown";
+      const model = typeof started?.model === "string"
+        ? started.model
+        : rawProvider.startsWith("openai-compatible:")
+          ? rawProvider.slice("openai-compatible:".length)
+          : rawProvider;
+      const completedRecord = records.find((record) => record.event === "courses.discovered");
 
       return {
         runId,
-        provider,
+        provider: humanProviderLabel(rawProvider, model),
+        model,
         status: typeof finished?.status === "string" ? finished.status : "IN_PROGRESS",
+        timestamp: typeof finished?.timestamp === "string" ? finished.timestamp : "",
+        courseCount: typeof completedRecord?.courseCount === "number" ? completedRecord.courseCount : 0,
+        blockedAttempts: records.filter((record) => record.event === "assignment.blocked").length,
+        assignmentsSubmitted: records.filter(
+          (record) => record.event === "assignment.submitted" && record.status === "SUCCESS"
+        ).length,
+        ledgerPath: `ledger/${entry.file}`,
         evidenceDirectory: `evidence/${runId}`
       };
     } catch {
@@ -276,8 +302,14 @@ function readLatestRunSummary(): DemoRunSummary | null {
 
 export function getDemoStatusSnapshot(userId: string) {
   const courses = db
-    .prepare("SELECT id, title FROM courses ORDER BY title")
-    .all() as Array<{ id: string; title: string }>;
+    .prepare("SELECT id, code, title, instructor, description FROM courses ORDER BY title")
+    .all() as Array<{
+      id: string;
+      code: string | null;
+      title: string;
+      instructor: string | null;
+      description: string | null;
+    }>;
 
   const courseStatus = courses.map((course) => {
     const activities = db
@@ -325,10 +357,13 @@ export function getDemoStatusSnapshot(userId: string) {
 
     return {
       id: course.id,
+      code: course.code,
       title: course.title,
+      instructor: course.instructor,
+      description: course.description,
       activityCount: activities.length,
       recordingComplete: Boolean(progress?.complete),
-      progressPercent,
+      progressPercent: progress?.complete ? 100 : progressPercent,
       assignmentState: submission
         ? "SUBMITTED"
         : eligibility.eligible
@@ -358,6 +393,10 @@ app.get("/", (req, res) => {
   }
 
   res.redirect("/login");
+});
+
+app.get("/healthz", (_req, res) => {
+  res.json({ status: "ok", service: "mock-college-lms" });
 });
 
 app.get("/login", (_req, res) => {
@@ -441,11 +480,25 @@ app.post("/logout", (_req, res) => {
 app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
   const courses = db
     .prepare(`
-      SELECT id, title
+      SELECT id, code, title, instructor, description
       FROM courses
       ORDER BY title
     `)
-    .all() as Array<{ id: string; title: string }>;
+    .all() as Array<{
+      id: string;
+      code: string | null;
+      title: string;
+      instructor: string | null;
+      description: string | null;
+    }>;
+  const completedRecordings = (db
+    .prepare("SELECT COUNT(*) AS count FROM recording_progress WHERE user_id = ? AND complete = 1")
+    .get(req.userId) as { count: number }).count;
+  const submittedAssignments = (db
+    .prepare("SELECT COUNT(*) AS count FROM assignment_submissions WHERE user_id = ? AND status = 'SUBMITTED'")
+    .get(req.userId) as { count: number }).count;
+  const greetingHour = new Date().getHours();
+  const greeting = greetingHour < 12 ? "Good morning" : greetingHour < 18 ? "Good afternoon" : "Good evening";
 
   const cards = courses
     .map((course) => {
@@ -514,17 +567,24 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
 
       const durationSeconds = recording?.duration_seconds ?? 0;
       const watchedSeconds = progress?.watched_seconds ?? 0;
-      const progressPercent = durationSeconds
+      const progressPercent = progress?.complete
+        ? 100
+        : durationSeconds
         ? Math.min(100, Math.round((watchedSeconds / durationSeconds) * 100))
         : 0;
-      const recordingState = progress?.complete ? "Complete" : "In progress";
+      const recordingState = progress?.complete
+        ? "Complete"
+        : watchedSeconds > 0
+          ? "In progress"
+          : "Not started";
 
       return `
         <article class="card course-card" data-testid="course-card" data-course-id="${escapeHtml(course.id)}">
           <div class="course-card-header">
             <div>
-              <p class="eyebrow">Course workspace</p>
+              <p class="eyebrow">${escapeHtml(course.code || "COURSE")} · Course workspace</p>
               <h2 data-testid="course-title">${escapeHtml(course.title)}</h2>
+              <p class="muted" style="margin:0;font-size:13px;">${escapeHtml(course.description || "A focused Mock College learning experience.")}</p>
             </div>
             <span class="status ${statusClass}" data-testid="assignment-status" data-state="${state}">${state}</span>
           </div>
@@ -538,8 +598,9 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
           </div>
           <div class="progress-caption">
             <span data-testid="recording-progress-percent">${progressPercent}% server accepted</span>
-            <span>${durationSeconds || "—"} sec</span>
+            <span>${activities.length} activities · ${durationSeconds || "—"} sec</span>
           </div>
+          <p class="muted" style="font-size:12px;margin:12px 0 0;">Instructor: ${escapeHtml(course.instructor || "Mock College Faculty")}</p>
 
           <div class="course-next" data-testid="course-next-action">
             ${submission
@@ -550,6 +611,7 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
           </div>
 
           <div class="button-row">
+            <a class="button secondary" data-testid="course-link" href="/courses/${encodeURIComponent(course.id)}">Open course</a>
             ${recording
               ? `<a class="button secondary" data-testid="recording-link" href="/recordings/${encodeURIComponent(recording.id)}">Open recording</a>`
               : ""}
@@ -569,9 +631,9 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
       <div class="page-heading" data-testid="courses-heading">
         <div>
           <p class="eyebrow">Student workspace</p>
-          <h1>Your course overview</h1>
+          <h1>${greeting}, Demo Student</h1>
           <p class="muted">
-            Server truth keeps each assignment safely behind its required recording.
+            Your learning overview · server truth keeps every assignment safely behind its required recording.
           </p>
         </div>
         <div class="heading-actions">
@@ -581,6 +643,12 @@ app.get("/courses", requireAuth, (req: AuthedRequest, res) => {
             <button class="button ghost" data-testid="logout-button" type="submit">Log out</button>
           </form>
         </div>
+      </div>
+
+      <div class="status-grid" data-testid="dashboard-summary">
+        <div class="status-metric"><span class="metric-label">My courses</span><strong>${courses.length}</strong></div>
+        <div class="status-metric"><span class="metric-label">Recordings complete</span><strong>${completedRecordings} / ${courses.length}</strong></div>
+        <div class="status-metric"><span class="metric-label">Assignments submitted</span><strong>${submittedAssignments} / ${courses.length}</strong></div>
       </div>
 
       <div class="course-grid" data-testid="course-grid">
@@ -599,7 +667,7 @@ app.get("/demo-status", requireAuth, (req: AuthedRequest, res) => {
     .map(
       (course) => `
         <tr data-testid="demo-status-course" data-course-id="${escapeHtml(course.id)}">
-          <td><strong>${escapeHtml(course.title)}</strong></td>
+          <td><strong>${escapeHtml(course.code || "COURSE")}</strong><br />${escapeHtml(course.title)}</td>
           <td>${course.activityCount}</td>
           <td>${course.recordingComplete ? "Complete" : "Incomplete"} · ${course.progressPercent}%</td>
           <td><span class="status ${course.assignmentState === "SUBMITTED" ? "submitted" : course.assignmentState === "OPEN" ? "open" : "locked"}" data-testid="demo-status-assignment">${course.assignmentState}</span></td>
@@ -636,7 +704,11 @@ app.get("/demo-status", requireAuth, (req: AuthedRequest, res) => {
           </div>
           <span class="status ${runStatusClass}" data-testid="demo-run-badge">${latestRun ? escapeHtml(latestRun.status) : "NOT RUN"}</span>
         </div>
+        <p class="muted" data-testid="demo-run-model">Model: ${latestRun ? escapeHtml(latestRun.model) : "—"}</p>
+        <p class="muted">Courses: ${latestRun?.courseCount ?? "—"} · Blocked attempts: ${latestRun?.blockedAttempts ?? "—"} · Assignments submitted: ${latestRun?.assignmentsSubmitted ?? "—"}</p>
         <p class="muted" data-testid="demo-evidence-directory">Evidence: ${latestRun ? escapeHtml(latestRun.evidenceDirectory) : "—"}</p>
+        <p class="muted">Ledger: ${latestRun ? escapeHtml(latestRun.ledgerPath) : "—"}</p>
+        <p class="muted" style="margin-bottom:0;">Historical automation evidence remains available after the demo database is reset.</p>
         <p class="muted" style="margin-bottom:0;">Credentials, cookies, authorization headers, and provider secrets are intentionally excluded.</p>
       </section>
 
@@ -651,6 +723,108 @@ app.get("/demo-status", requireAuth, (req: AuthedRequest, res) => {
           <thead><tr><th>Course</th><th>Activities</th><th>Recording</th><th>Assignment</th></tr></thead>
           <tbody>${courseRows}</tbody>
         </table>
+      </section>
+      `
+    )
+  );
+});
+
+app.get("/courses/:id", requireAuth, (req: AuthedRequest, res) => {
+  const courseId = getRouteParam(req, "id");
+  if (!courseId) return res.status(400).send("Invalid course id");
+
+  const course = db
+    .prepare("SELECT id, code, title, instructor, description FROM courses WHERE id = ?")
+    .get(courseId) as
+    | { id: string; code: string | null; title: string; instructor: string | null; description: string | null }
+    | undefined;
+  if (!course) return res.status(404).send("Course not found");
+
+  const activities = db
+    .prepare(`
+      SELECT id, type, title, duration_seconds, sort_order
+      FROM activities
+      WHERE course_id = ?
+      ORDER BY sort_order
+    `)
+    .all(course.id) as Array<{
+    id: string;
+    type: "MEETING_RECORDING" | "ASSIGNMENT";
+    title: string;
+    duration_seconds: number | null;
+    sort_order: number;
+  }>;
+  const recording = activities.find((activity) => activity.type === "MEETING_RECORDING");
+  const assignment = activities.find((activity) => activity.type === "ASSIGNMENT");
+  const progress = recording
+    ? (db
+        .prepare(`
+          SELECT watched_seconds, last_position_seconds, complete
+          FROM recording_progress
+          WHERE user_id = ? AND activity_id = ?
+        `)
+        .get(req.userId, recording.id) as
+        | { watched_seconds: number; last_position_seconds: number; complete: number }
+        | undefined)
+    : undefined;
+  const eligibility = assignment
+    ? getAssignmentEligibility(req.userId!, assignment.id)
+    : { eligible: false, reason: "NO_ASSIGNMENT" };
+  const submission = assignment
+    ? (db
+        .prepare("SELECT status FROM assignment_submissions WHERE user_id = ? AND activity_id = ?")
+        .get(req.userId, assignment.id) as { status: string } | undefined)
+    : undefined;
+  const recordingPercent = recording?.duration_seconds
+    ? progress?.complete
+      ? 100
+      : Math.min(100, Math.round(((progress?.watched_seconds ?? 0) / recording.duration_seconds) * 100))
+    : 0;
+  const recordingState = progress?.complete
+    ? "COMPLETE"
+    : progress && progress.last_position_seconds > 0
+      ? "IN PROGRESS"
+      : "NOT STARTED";
+  const assignmentState = submission ? "SUBMITTED" : eligibility.eligible ? "OPEN" : "LOCKED";
+
+  res.send(
+    htmlPage(
+      course.title,
+      `
+      <div class="page-heading" data-testid="course-detail">
+        <div>
+          <p class="eyebrow">${escapeHtml(course.code || "COURSE")} · Course detail</p>
+          <h1>${escapeHtml(course.title)}</h1>
+          <p class="muted">${escapeHtml(course.description || "A focused Mock College learning experience.")}</p>
+          <p class="muted" style="font-size:13px;margin-bottom:0;">Instructor: ${escapeHtml(course.instructor || "Mock College Faculty")}</p>
+        </div>
+        <a class="button secondary" data-testid="course-detail-back" href="/courses">← Dashboard</a>
+      </div>
+
+      <section class="card">
+        <div class="section-heading">
+          <div><p class="eyebrow">Course progress</p><h2>${recordingPercent}% complete</h2></div>
+          <span class="status ${recordingState === "COMPLETE" ? "submitted" : "locked"}">${recordingState}</span>
+        </div>
+        <div class="progress-track" role="progressbar" aria-label="Course progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${recordingPercent}"><div class="progress-bar" style="width:${recordingPercent}%"></div></div>
+      </section>
+
+      <section class="card" data-testid="activity-list">
+        <div class="section-heading"><div><p class="eyebrow">Learning path</p><h2>Activities</h2></div><span class="muted">${activities.length} activities</span></div>
+        <div class="status-grid">
+          <div class="status-metric" data-testid="recording-activity">
+            <span class="metric-label">Meeting recording</span>
+            <strong>${recording ? escapeHtml(recording.title) : "Not configured"}</strong>
+            <p class="muted">${recordingState} · ${recordingPercent}%</p>
+            ${recording ? `<a class="button secondary" href="/recordings/${encodeURIComponent(recording.id)}">Open recording</a>` : ""}
+          </div>
+          <div class="status-metric" data-testid="assignment-activity">
+            <span class="metric-label">Assignment</span>
+            <strong>${assignment ? escapeHtml(assignment.title) : "Not configured"}</strong>
+            <p class="muted">${assignmentState}${assignmentState === "LOCKED" ? " · Complete the required meeting recording to unlock this assignment." : ""}</p>
+            ${assignment && eligibility.eligible ? `<a class="button" href="/assignments/${encodeURIComponent(assignment.id)}">Open assignment</a>` : ""}
+          </div>
+        </div>
       </section>
       `
     )
@@ -746,7 +920,7 @@ app.get(
                 <span id="percentReadout" data-testid="recording-percent">0%</span>
               </div>
               <p class="recording-status" id="serverProgress" data-testid="server-progress" style="margin:18px 0 0;">
-                Server accepted: ${progress.watched_seconds.toFixed(1)} sec
+                Server-validated watch time: ${progress.watched_seconds.toFixed(1)} sec
               </p>
               <div class="gate-note" data-testid="gate-warning">
                 <strong>Gate rule</strong>
@@ -780,7 +954,7 @@ app.get(
     progressTrack.setAttribute("aria-valuenow", String(percent));
     timeReadout.textContent = position.toFixed(0) + " / " + duration + " sec";
     percentReadout.textContent = percent + "%";
-    serverProgress.textContent = "Server accepted: " + watched.toFixed(1) + " sec";
+    serverProgress.textContent = "Server-validated watch time: " + watched.toFixed(1) + " sec";
 
     if (complete) {
       button.textContent = "Completed ✓";
@@ -788,8 +962,11 @@ app.get(
       status.textContent = "College reports recording complete ✓";
     } else {
       button.textContent = playing ? "Pause" : "Play recording";
-      status.textContent =
-        "Playback in progress";
+      status.textContent = playing
+        ? "Playback in progress"
+        : position > 0
+          ? "In progress"
+          : "Ready to play";
     }
   }
 
@@ -923,17 +1100,21 @@ app.get(
 
     const activity = db
       .prepare(`
-        SELECT id, title
+        SELECT id, course_id, title
         FROM activities
         WHERE id = ? AND type = 'ASSIGNMENT'
       `)
       .get(assignmentId) as
-      | { id: string; title: string }
+      | { id: string; course_id: string; title: string }
       | undefined;
 
     if (!activity) {
       return res.status(404).send("Assignment not found");
     }
+
+    const course = db
+      .prepare("SELECT code, title FROM courses WHERE id = ?")
+      .get(activity.course_id) as { code: string | null; title: string } | undefined;
 
     const eligibility = getAssignmentEligibility(
       req.userId!,
@@ -975,7 +1156,7 @@ app.get(
     }>;
 
     const fields = questions
-      .map((question) => {
+      .map((question, index) => {
         if (question.type === "MULTIPLE_CHOICE") {
           const options = JSON.parse(
             question.options_json || "[]"
@@ -983,6 +1164,7 @@ app.get(
 
           return `
             <div class="card question-card" data-testid="question-card" data-question-id="${escapeHtml(question.id)}">
+               <p class="eyebrow">Question ${index + 1} of ${questions.length} · Multiple choice</p>
                <p><strong>${escapeHtml(question.prompt)}</strong></p>
                ${options
                  .map(
@@ -1006,8 +1188,9 @@ app.get(
 
         return `
           <div class="card question-card" data-testid="question-card" data-question-id="${escapeHtml(question.id)}">
+            <p class="eyebrow">Question ${index + 1} of ${questions.length} · Short answer</p>
             <label class="field-label" for="question-${escapeHtml(question.id)}">${escapeHtml(question.prompt)}</label>
-            <input id="question-${escapeHtml(question.id)}" data-testid="question-input" name="${escapeHtml(question.id)}" required />
+            <textarea id="question-${escapeHtml(question.id)}" data-testid="question-input" name="${escapeHtml(question.id)}" rows="4" required></textarea>
           </div>
         `;
       })
@@ -1021,7 +1204,7 @@ app.get(
           <div>
             <p class="eyebrow">Assignment workspace</p>
             <h1>${escapeHtml(activity.title)}</h1>
-            <p class="muted">Answer each question, then submit once. The college server owns eligibility.</p>
+            <p class="muted">${escapeHtml(course?.code || "COURSE")} · ${escapeHtml(course?.title || "Mock College")} · Answer each question, then submit once.</p>
           </div>
           <a class="button secondary" data-testid="assignment-back" href="/courses">← Back to courses</a>
         </div>
@@ -1098,7 +1281,7 @@ app.post(
 app.get("/api/courses", requireAuth, (req: AuthedRequest, res) => {
   const courses = db
     .prepare(`
-      SELECT id, title
+      SELECT id, code, title, instructor, description
       FROM courses
       ORDER BY title
     `)

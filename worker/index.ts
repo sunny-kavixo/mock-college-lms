@@ -21,7 +21,10 @@ interface CourseActivity {
 
 interface DiscoveredCourse {
   id: string;
+  code: string | null;
   title: string;
+  instructor: string | null;
+  description: string | null;
   activities: CourseActivity[];
 }
 
@@ -198,8 +201,8 @@ async function discoverCourses(page: Page): Promise<DiscoveredCourse[]> {
   });
   const courses = response as DiscoveredCourse[];
 
-  if (courses.length !== 2) {
-    throw new Error(`Expected two courses, discovered ${courses.length}`);
+  if (courses.length === 0) {
+    throw new Error("Course discovery returned no courses");
   }
 
   if (
@@ -231,9 +234,9 @@ async function extractQuestions(page: Page): Promise<AssignmentQuestion[]> {
   return page.locator('[data-testid="question-card"]').evaluateAll((cards) =>
     cards.map((card) => {
       const inputs = Array.from(card.querySelectorAll("input"));
-      const firstInput = inputs[0];
-      const questionId = firstInput?.getAttribute("name") || "";
-      const type = firstInput?.getAttribute("type") === "radio"
+      const field = card.querySelector("input, textarea");
+      const questionId = field?.getAttribute("name") || "";
+      const type = field?.getAttribute("type") === "radio"
         ? "MULTIPLE_CHOICE"
         : "TEXT";
       const prompt =
@@ -253,7 +256,7 @@ async function fillAnswers(
   page: Page,
   answers: Record<string, string>
 ): Promise<void> {
-  for (const input of await page.locator("form input").all()) {
+  for (const input of await page.locator("form input, form textarea").all()) {
     const name = await input.getAttribute("name");
     const answer = name ? answers[name] : undefined;
     if (answer === undefined) throw new Error("AI provider omitted an answer");
@@ -464,7 +467,9 @@ async function submitAssignment(
         activityType: assignment.type,
         reason: "SERVER_ELIGIBLE"
       });
-      return extractQuestions(page);
+      const questions = await extractQuestions(page);
+      console.log(`  ✓ ${questions.length} questions discovered`);
+      return questions;
     }
   });
   await fillAnswers(page, answers);
@@ -525,6 +530,9 @@ export async function runWorker(): Promise<{
     collegeOrigin: new URL(baseUrl).origin,
     automation: "playwright",
     provider: provider.name,
+    model: provider.name.startsWith("openai-compatible:")
+      ? provider.name.slice("openai-compatible:".length)
+      : provider.name,
     reason: "WORKER_STARTED"
   });
   console.log(`RUN: ${runId}`);
@@ -573,6 +581,8 @@ export async function runWorker(): Promise<{
         courseId: course.id,
         activityType: "COURSE",
         reason: "COURSE_DISCOVERED",
+        code: course.code,
+        instructor: course.instructor,
         title: course.title
       });
       for (const activity of course.activities) {
@@ -616,7 +626,7 @@ export async function runWorker(): Promise<{
         throw new Error(`Course ${course.id} is missing required activities`);
       }
 
-      console.log(`\nCOURSE: ${course.title}`);
+      console.log(`\n[${course.code || course.id}] ${course.title}`);
       console.log("  ✓ Activities discovered");
       await probeLockedAssignment(page, assignment, course, ledger, evidence);
       console.log("  ✓ Assignment initially blocked");
@@ -654,7 +664,7 @@ export async function runWorker(): Promise<{
       invariantCheck: "PASS",
       courseCount: courses.length
     });
-    console.log(`\nRUN COMPLETE\n  Status: SUCCESS\n  Ledger: ${ledger.filePath}\n  Evidence: ${path.resolve("evidence", runId)}`);
+    console.log(`\nRUN COMPLETE\n  Status: SUCCESS\n  Courses: ${courses.length}/${courses.length} completed\n  Assignments: ${courses.length}/${courses.length} submitted\n  Invariant check: PASS\n  Ledger: ${ledger.filePath}\n  Evidence: ${path.resolve("evidence", runId)}`);
 
     return {
       runId,

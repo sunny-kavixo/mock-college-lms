@@ -15,6 +15,38 @@ function initialState(): RecordingGateState {
 }
 
 describe("recording completion gate", () => {
+  test("27 of 28 seconds remains incomplete and 28 of 28 completes", () => {
+    const beforeEnd = evaluateRecordingHeartbeat({
+      durationSeconds: 28,
+      reportedPositionSeconds: 27,
+      nowMs: 28_000,
+      previous: {
+        contiguousSeconds: 26,
+        lastPositionSeconds: 26,
+        watchedSeconds: 26,
+        complete: false,
+        updatedAtMs: 27_000
+      }
+    });
+    expect(beforeEnd.complete).toBe(false);
+    expect(beforeEnd.lastPositionSeconds).toBe(27);
+
+    const atEnd = evaluateRecordingHeartbeat({
+      durationSeconds: 28,
+      reportedPositionSeconds: 28,
+      nowMs: 29_000,
+      previous: {
+        contiguousSeconds: beforeEnd.contiguousSeconds,
+        lastPositionSeconds: beforeEnd.lastPositionSeconds,
+        watchedSeconds: beforeEnd.watchedSeconds,
+        complete: beforeEnd.complete,
+        updatedAtMs: beforeEnd.updatedAtMs
+      }
+    });
+    expect(atEnd.complete).toBe(true);
+    expect(atEnd.lastPositionSeconds).toBe(28);
+  });
+
   test("rapid small heartbeats cannot manufacture elapsed watch time", () => {
     let state = initialState();
     for (let tick = 1; tick <= 240; tick++) {

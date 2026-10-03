@@ -105,7 +105,7 @@ export function checkRunInvariants(records: LedgerRecord[]): string[] {
         !started || !(duration > 0) || record.status !== "SUCCESS" ||
         record.serverReportedComplete !== true ||
         !(Number(record.contiguousSeconds) >= duration * 0.9) ||
-        !(Number(record.completionPositionSeconds) >= duration - 1) ||
+        !(Number(record.completionPositionSeconds) >= duration) ||
         Date.parse(record.timestamp) - Date.parse(started.timestamp) < duration * 900
       ) {
         errors.push(`Invalid server completion evidence for ${record.activityId}`);

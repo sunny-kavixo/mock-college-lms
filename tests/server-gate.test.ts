@@ -74,7 +74,16 @@ describe("server recording gate", () => {
     expect(statusHtml).toContain('data-testid="demo-status"');
     expect(statusHtml).toContain("Run visibility");
     expect(statusHtml).not.toContain("demo123");
-    expect(getDemoStatusSnapshot("user-demo").courses).toHaveLength(2);
+    expect(getDemoStatusSnapshot("user-demo").courses).toHaveLength(4);
+  });
+
+  test("healthz is public and does not expose application state", async () => {
+    const response = await fetch(`${origin}/healthz`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      status: "ok",
+      service: "mock-college-lms"
+    });
   });
 
   test("keeps an assignment locked until the recording is complete", () => {
@@ -120,6 +129,32 @@ describe("server recording gate", () => {
       eligible: true,
       reason: "ELIGIBLE"
     });
+  });
+
+  test("keeps the 28-second course locked at 27/28 and opens at 28/28", () => {
+    const start = Date.now() + 1000;
+    let latest: ReturnType<typeof processRecordingHeartbeat> | undefined;
+    for (let second = 1; second <= 27; second += 1) {
+      latest = processRecordingHeartbeat({
+        userId: "user-demo",
+        activityId: "recording-business",
+        positionSeconds: second,
+        now: new Date(start + second * 1000)
+      });
+    }
+    expect(latest?.positionSeconds).toBe(27);
+    expect(latest?.complete).toBe(false);
+    expect(getAssignmentEligibility("user-demo", "assignment-business").eligible).toBe(false);
+
+    latest = processRecordingHeartbeat({
+      userId: "user-demo",
+      activityId: "recording-business",
+      positionSeconds: 28,
+      now: new Date(start + 28 * 1000)
+    });
+    expect(latest.positionSeconds).toBe(28);
+    expect(latest.complete).toBe(true);
+    expect(getAssignmentEligibility("user-demo", "assignment-business").eligible).toBe(true);
   });
 
   test("rejects a heartbeat for a missing progress row", () => {

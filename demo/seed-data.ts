@@ -1,4 +1,5 @@
 import { db, initSchema } from "../college/db/db";
+import { COURSE_CATALOG } from "./catalog";
 
 export interface SeedCounts {
   users: number;
@@ -32,109 +33,58 @@ export function seedDatabase(): SeedCounts {
     );
 
     const insertCourse = db.prepare(`
-      INSERT INTO courses (id, title)
-      VALUES (?, ?)
+      INSERT INTO courses (id, code, title, instructor, description)
+      VALUES (?, ?, ?, ?, ?)
     `);
-
-    insertCourse.run("course-econ", "Introduction to Economics");
-    insertCourse.run("course-business", "Business Fundamentals");
-
     const insertActivity = db.prepare(`
       INSERT INTO activities
         (id, course_id, type, title, duration_seconds, sort_order)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
-
-    insertActivity.run(
-      "recording-econ",
-      "course-econ",
-      "MEETING_RECORDING",
-      "Economics Meeting Recording",
-      24,
-      1
-    );
-
-    insertActivity.run(
-      "assignment-econ",
-      "course-econ",
-      "ASSIGNMENT",
-      "Economics Assignment",
-      null,
-      2
-    );
-
-    insertActivity.run(
-      "recording-business",
-      "course-business",
-      "MEETING_RECORDING",
-      "Business Fundamentals Meeting Recording",
-      28,
-      1
-    );
-
-    insertActivity.run(
-      "assignment-business",
-      "course-business",
-      "ASSIGNMENT",
-      "Business Fundamentals Assignment",
-      null,
-      2
-    );
-
     const insertQuestion = db.prepare(`
       INSERT INTO questions
         (id, activity_id, type, prompt, options_json, expected_answer)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
 
-    insertQuestion.run(
-      "q-econ-1",
-      "assignment-econ",
-      "MULTIPLE_CHOICE",
-      "Which concept describes the next best alternative given up when making a choice?",
-      JSON.stringify([
-        "Opportunity cost",
-        "Inflation",
-        "Revenue",
-        "Demand"
-      ]),
-      "Opportunity cost"
-    );
+    for (const course of COURSE_CATALOG) {
+      insertCourse.run(
+        course.id,
+        course.code,
+        course.title,
+        course.instructor,
+        course.description
+      );
+      insertActivity.run(
+        course.recording.id,
+        course.id,
+        "MEETING_RECORDING",
+        course.recording.title,
+        course.recording.durationSeconds,
+        1
+      );
+      insertActivity.run(
+        course.assignment.id,
+        course.id,
+        "ASSIGNMENT",
+        course.assignment.title,
+        null,
+        2
+      );
 
-    insertQuestion.run(
-      "q-econ-2",
-      "assignment-econ",
-      "TEXT",
-      "In one sentence, explain scarcity.",
-      null,
-      "Scarcity means limited resources are available to satisfy unlimited wants."
-    );
-
-    insertQuestion.run(
-      "q-business-1",
-      "assignment-business",
-      "MULTIPLE_CHOICE",
-      "Which statement best describes revenue?",
-      JSON.stringify([
-        "Money earned from sales before expenses",
-        "Profit after tax only",
-        "The cost of employees",
-        "A company's debt"
-      ]),
-      "Money earned from sales before expenses"
-    );
-
-    insertQuestion.run(
-      "q-business-2",
-      "assignment-business",
-      "TEXT",
-      "In one sentence, explain why businesses track costs.",
-      null,
-      "Businesses track costs to understand spending and measure profitability."
-    );
+      for (const question of course.assignment.questions) {
+        insertQuestion.run(
+          question.id,
+          course.assignment.id,
+          question.type,
+          question.prompt,
+          question.options ? JSON.stringify(question.options) : null,
+          question.expectedAnswer
+        );
+      }
+    }
 
     const now = new Date().toISOString();
-
     const insertProgress = db.prepare(`
       INSERT INTO recording_progress
         (
@@ -149,8 +99,9 @@ export function seedDatabase(): SeedCounts {
       VALUES (?, ?, 0, 0, 0, 0, ?)
     `);
 
-    insertProgress.run("user-demo", "recording-econ", now);
-    insertProgress.run("user-demo", "recording-business", now);
+    for (const course of COURSE_CATALOG) {
+      insertProgress.run("user-demo", course.recording.id, now);
+    }
   });
 
   seed();

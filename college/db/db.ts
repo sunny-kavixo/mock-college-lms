@@ -3,12 +3,19 @@ import fs from "node:fs";
 import path from "node:path";
 
 const dataDir = path.resolve("data");
-fs.mkdirSync(dataDir, { recursive: true });
-
-// Invariant tests must never reset the interactive demo's persisted state.
+const configuredDbPath = process.env.DB_PATH;
+const resolvedDbPath = configuredDbPath
+  ? configuredDbPath === ":memory:"
+    ? configuredDbPath
+    : path.resolve(configuredDbPath)
+  : path.join(dataDir, "mock-college.db");
 export const DB_PATH = process.env.VITEST === "true"
   ? ":memory:"
-  : path.join(dataDir, "mock-college.db");
+  : resolvedDbPath;
+
+if (DB_PATH !== ":memory:") {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+}
 
 export const db = new Database(DB_PATH);
 
@@ -26,7 +33,10 @@ export function initSchema(): void {
 
     CREATE TABLE IF NOT EXISTS courses (
       id TEXT PRIMARY KEY,
-      title TEXT NOT NULL
+      code TEXT,
+      title TEXT NOT NULL,
+      instructor TEXT,
+      description TEXT
     );
 
     CREATE TABLE IF NOT EXISTS activities (
@@ -79,4 +89,17 @@ export function initSchema(): void {
     CREATE INDEX IF NOT EXISTS idx_questions_activity
       ON questions(activity_id);
   `);
+
+  const columns = db
+    .pragma("table_info(courses)") as Array<{ name: string }>;
+  const existing = new Set(columns.map((column) => column.name));
+  for (const [name, definition] of [
+    ["code", "TEXT"],
+    ["instructor", "TEXT"],
+    ["description", "TEXT"]
+  ] as const) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE courses ADD COLUMN ${name} ${definition}`);
+    }
+  }
 }

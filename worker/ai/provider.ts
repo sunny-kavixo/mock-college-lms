@@ -69,9 +69,27 @@ class DeterministicDevAnswerProvider implements AIAnswerProvider {
       if (prompt.includes("scarcity")) {
         answers[question.id] =
           "Scarcity means limited resources are available to satisfy unlimited wants.";
+      } else if (prompt.includes("trade-off")) {
+        answers[question.id] =
+          "Choosing study time over a social activity is a trade-off because one option is given up.";
       } else if (prompt.includes("track costs")) {
         answers[question.id] =
           "Businesses track costs to understand spending and measure profitability.";
+      } else if (prompt.includes("cash flow")) {
+        answers[question.id] =
+          "Cash flow shows whether a business can cover its short-term obligations.";
+      } else if (prompt.includes("validate data")) {
+        answers[question.id] =
+          "Validation catches inaccurate or inconsistent inputs before they affect conclusions.";
+      } else if (prompt.includes("analysis workflow")) {
+        answers[question.id] =
+          "A simple workflow defines a question, cleans data, analyzes patterns, and communicates findings.";
+      } else if (prompt.includes("evaluate model")) {
+        answers[question.id] =
+          "Evaluation checks whether outputs are accurate, useful, and safe for the intended context.";
+      } else if (prompt.includes("responsible ai")) {
+        answers[question.id] =
+          "Teams should consider privacy, fairness, transparency, and human oversight when using AI.";
       } else {
         answers[question.id] =
           "This answer explains the key concept using the course material.";

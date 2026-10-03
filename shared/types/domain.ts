@@ -4,7 +4,10 @@ export type QuestionType = "MULTIPLE_CHOICE" | "TEXT";
 
 export interface Course {
   id: string;
+  code: string;
   title: string;
+  instructor: string;
+  description: string;
 }
 
 export interface Activity {
