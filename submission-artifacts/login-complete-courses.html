@@ -1,0 +1,164 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Courses | Mock College</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+    background: #f5f7fb;
+    color: #172033;
+  }
+  header {
+    background: #13233f;
+    color: white;
+    padding: 18px 28px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  header a { color: white; text-decoration: none; }
+  main {
+    max-width: 980px;
+    margin: 40px auto;
+    padding: 0 20px;
+  }
+  .card {
+    background: white;
+    border: 1px solid #dde3ec;
+    border-radius: 16px;
+    padding: 22px;
+    margin-bottom: 18px;
+    box-shadow: 0 6px 24px rgba(20, 35, 60, .06);
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit,minmax(280px,1fr));
+    gap: 18px;
+  }
+  button, .button {
+    display: inline-block;
+    background: #1d4ed8;
+    color: white;
+    border: 0;
+    border-radius: 9px;
+    padding: 11px 16px;
+    cursor: pointer;
+    text-decoration: none;
+    font-weight: 600;
+  }
+  button:disabled, .disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+  input {
+    width: 100%;
+    padding: 11px;
+    margin: 6px 0 14px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+  }
+  .status {
+    display: inline-block;
+    padding: 5px 9px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .locked { background: #fee2e2; color: #991b1b; }
+  .open { background: #dcfce7; color: #166534; }
+  .submitted { background: #dbeafe; color: #1e40af; }
+  .progress-track {
+    height: 14px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #e5e7eb;
+  }
+  .progress-bar {
+    height: 100%;
+    width: 0%;
+    background: #2563eb;
+    transition: width .25s linear;
+  }
+  .recording {
+    background: #0f172a;
+    color: white;
+    min-height: 250px;
+    border-radius: 14px;
+    display: grid;
+    place-items: center;
+    text-align: center;
+    padding: 30px;
+    margin-bottom: 18px;
+  }
+  .muted { color: #64748b; }
+  .error { color: #b91c1c; }
+  label { font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/courses"><strong>Mock College LMS</strong></a>
+  <span>Engineering Exercise</span>
+</header>
+<main>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <h1>Your Courses</h1>
+          <p class="muted">
+            Recordings must be server-confirmed complete before assignments unlock.
+          </p>
+        </div>
+
+        <form method="post" action="/logout">
+          <button type="submit">Logout</button>
+        </form>
+      </div>
+
+      <div class="grid">
+        
+        <div class="card">
+          <h2>Business Fundamentals</h2>
+
+          <p>
+            Recording:
+            <strong>Incomplete</strong>
+          </p>
+
+          <p>
+            Assignment:
+            <span class="status locked">LOCKED</span>
+          </p>
+
+          <a class="button" href="/recordings/recording-business">
+                   Open recording
+                 </a>
+
+          
+        </div>
+      
+        <div class="card">
+          <h2>Introduction to Economics</h2>
+
+          <p>
+            Recording:
+            <strong>Incomplete</strong>
+          </p>
+
+          <p>
+            Assignment:
+            <span class="status locked">LOCKED</span>
+          </p>
+
+          <a class="button" href="/recordings/recording-econ">
+                   Open recording
+                 </a>
+
+          
+        </div>
+      
+      </div>
+      </main>
+
+</body></html>
